@@ -124,6 +124,38 @@ takes effect on the next sensor update, so allow up to `10 s`.
 
 Humidity is not calibrated.
 
+### The AHT20's own calibration
+
+The AHT20 does self-calibrate, but **only at boot**, and ESPHome gives you no way
+to trigger or repeat it. On every start-up the driver
+(`esphome/components/aht10/aht10.cpp`) does:
+
+1. Soft reset (`0xBA`), then waits 30 ms.
+2. Sends the calibration/initialisation command: `0xBE 0x08 0x00` for the AHT20
+   variant, `0xE1 0x08 0x00` for AHT10.
+3. Polls the status byte while the busy bit (`0x80`) is set - at most 10 times
+   with 5 ms between reads, so roughly 50 ms.
+4. Requires `(status & 0x68) == 0x08`: mode bits `[6:5]` = `00` (normal) **and**
+   bit 3, the calibrated flag. Anything else logs `Initialization failed` and
+   marks the component failed, leaving it dead until the next reboot.
+
+Consequences:
+
+* There is **no runtime auto-calibration** - no entity, no option, no periodic
+  re-calibration. For a constant error the only lever is **Temperature Offset**
+  above, or a sensor filter.
+* Calibration is **re-run on every boot and every reflash**, which is the only
+  way to repeat it.
+* If the chip never raises the calibrated flag, or stays busy past ~50 ms, the
+  temperature and humidity entities go unavailable and the display shows `--`.
+* Independent drivers treat that `0xBE` write as optional. Adafruit's AHTX0
+  library sends it with the comment *"may not 'succeed' on newer AHT20s"* and
+  ignores the return value, while ESPHome fails the whole component if the write
+  is not acknowledged. A module that works on Arduino can therefore still fail
+  here - `variant: AHT10` is worth trying in that case.
+* AHT20 humidity can never legitimately read exactly `0 %RH`. ESPHome publishes
+  `NaN` and logs `Invalid humidity reading (0%)` when it sees that.
+
 ---
 
 ## MQTT interface
@@ -265,6 +297,9 @@ disappears on the next build.
 | Display shows garbage or flickers | Power the module from 3.3 V and shorten the wires. |
 | BH1750 missing in the boot scan (with `i2c: scan: true`; addresses are logged) | ADDR pin must be tied to GND for `0x23`. Without it the address is `0x5C`. |
 | AHT20 present but humidity is constantly NaN | Try `variant: AHT10`. Some chips labelled AHT10 need the AHT20 driver and vice versa. |
+| `Initialization failed` at boot | The AHT20 did not report the calibrated flag (status bit 3) or is not in normal mode (`[6:5]` = `00`). Reset the board; if it persists, check wiring and power, and try `variant: AHT10`. |
+| `Initialization timed out` at boot | The sensor stayed busy longer than the ~50 ms the driver allows. Same checks as above. |
+| `Invalid humidity reading (0%)` in the log | The AHT20 reported exactly `0 %RH`, which it cannot really measure, so the reading is discarded. |
 | I2C read errors after long cable runs | Lower `i2c: frequency:` to `10kHz`. |
 | Humidity digits blink although the air feels fine | Humidity is outside the comfort band - check the `Humidity Min`/`Humidity Max` values. |
 | Display is very dim | The room is dark and the auto-dimming is working. Set `Dim Min Intensity` to `0` for the dimmest level, lower `Dim Lux Low`/`Dim Lux High`, or set `Dim Lux High` <= `Dim Lux Low` for full brightness. |
@@ -334,6 +369,14 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   (`filters: - offset: !lambda return id(temperature_offset).state;`), so the
   display, MQTT state and HA all report the corrected value. Range -10..10 °C in
   0.1 steps, applied on the next 10 s sensor update, not instantly.
+* AHT20 calibration is **boot-only and not runtime-accessible**: ESPHome sends
+  soft reset `0xBA`, then `0xBE 0x08 0x00` (`0xE1 0x08 0x00` for AHT10), polls
+  busy (`0x80`) up to 10x5 ms, then requires `(status & 0x68) == 0x08` (mode
+  `00`, calibrated bit 3) or it calls `mark_failed()`. No option, entity or
+  MQTT command can re-trigger it; only a reboot/reflash. Adafruit's AHTX0 driver
+  sends the same command but ignores a non-ACK ("may not 'succeed' on newer
+  AHT20s"), ESPHome does not - so try `variant: AHT10` if init fails.
+  Humidity of exactly `0 %RH` is treated as invalid and published as `NaN`.
 * Humidity blink: blank `buf[2]` and `buf[3]` when humidity is outside
   `[humidity_min, humidity_max]` and `(millis()/800) % 2 == 1`.
 * Auto-dim: the four tuning inputs are sanitised first - a `NaN` or nonsense
