@@ -32,14 +32,24 @@ substitutions:
   # The humidity digits blink while the humidity is outside the comfort band.
   humidity_blink_period_ms: "800"
 
-  # Which digit's decimal-point bit drives which colon dot. Digit indices are
-  # 0-based, i.e. 0..3 = digit 1..4 counted from the left.
-  # The colon of a 4-digit module sits between digit 2 and digit 3, so the two
-  # candidates are the decimal-point bits of index 1 and index 2.
-  # If the dots are swapped (or one stays dark), flip these two values - see
-  # "Calibrating the colon dots" in README.md.
-  colon_dot_upper_digit: "1"
-  colon_dot_lower_digit: "2"
+  # Which digit's decimal-point bit drives the colon. Indices are 0-based,
+  # 0 = leftmost digit.
+  # Measured on the reference module: index 1 lights BOTH colon dots. They share
+  # a single decimal-point line, so they can only be switched on and off
+  # together - steering them separately is not possible on this hardware.
+  # Re-measure with colon_diagnostic below after swapping the display.
+  colon_dot_digit: "1"
+
+  # Colon pattern:
+  #   0 = both dots permanently on
+  #   1 = both dots blink with colon_blink_period_ms
+  colon_mode: "1"
+
+  # Calibration helper. While "true" the display ignores temperature and
+  # humidity. For 2 s per step it shows a digit that names the decimal-point
+  # index currently being lit: "1" -> index 0, "2" -> index 1, "3" -> index 2,
+  # "4" -> index 3.
+  colon_diagnostic: "false"
 
 esphome:
   name: ${device_name}
@@ -113,6 +123,15 @@ sensor:
     id: illuminance
     update_interval: 10s
 
+  # The TM1637 brightness the auto-dimming currently applies, 0 (darkest) to
+  # 7 (brightest). Computed and published from the display lambda, so this
+  # entity never polls on its own.
+  - platform: template
+    name: "Display Brightness"
+    id: display_brightness
+    update_interval: never
+    accuracy_decimals: 0
+
 # -----------------------------------------------------------------------------
 # Runtime configuration (all values are restored across reboots)
 # -----------------------------------------------------------------------------
@@ -145,9 +164,12 @@ number:
     mode: BOX
 
   # Auto-dimming curve:
-  #   intensity = 1 + 6 * clamp((lux - low) / (high - low), 0 .. 1) ^ gamma
-  # 1 = dimmest, 7 = brightest. Setting "Dim Lux High" <= "Dim Lux Low" forces
-  # full brightness.
+  #   intensity = min + (7 - min) * clamp((lux - low) / (high - low), 0 .. 1) ^ gamma
+  # Intensity 0..7 selects the TM1637 pulse width:
+  #   0 = 1/16, 1 = 2/16, 2 = 4/16, 3 = 10/16, 4 = 11/16, 5 = 12/16,
+  #   6 = 13/16, 7 = 14/16
+  # 0 is a real brightness level - the dimmest visible duty - not "off".
+  # Setting "Dim Lux High" <= "Dim Lux Low" forces full brightness.
   - platform: template
     name: "Dim Lux Low"
     id: dim_lux_low
@@ -182,6 +204,20 @@ number:
     min_value: 0.2
     max_value: 3.0
     step: 0.1
+    mode: BOX
+
+  # Brightness reached in a fully dark room, 0..7. 1 keeps the display softly
+  # visible; 0 uses the dimmest duty (1/16), which is almost dark in daylight
+  # but still readable at night. It does not switch the display off.
+  - platform: template
+    name: "Dim Min Intensity"
+    id: dim_min_intensity
+    optimistic: true
+    restore_value: true
+    initial_value: 1
+    min_value: 0
+    max_value: 7
+    step: 1
     mode: BOX
 
 # -----------------------------------------------------------------------------
@@ -226,6 +262,10 @@ display:
 
       static const uint32_t COLON_PERIOD_MS = ${colon_blink_period_ms};
       static const uint32_t HUMIDITY_PERIOD_MS = ${humidity_blink_period_ms};
+
+      // Colon: 0 = both dots permanently on, 1 = both dots blinking.
+      static const int COLON_MODE = ${colon_mode};
+      static const bool COLON_DIAGNOSTIC = ${colon_diagnostic};
 
       uint8_t buf[4] = {SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK};
 
@@ -285,13 +325,14 @@ display:
         }
       }
 
-      // ---- colon: alternate the two dots -----------------------------------
-      // Applied after the blink, so a blanked humidity digit still leaves its
-      // colon dot lit (the colon LEDs and the digit segments are separate).
-      if (((millis() / COLON_PERIOD_MS) % 2) == 0) {
-        buf[${colon_dot_upper_digit}] |= 0x80;
-      } else {
-        buf[${colon_dot_lower_digit}] |= 0x80;
+      // ---- colon -----------------------------------------------------------
+      // Applied after the blink, so a blanked humidity digit still leaves the
+      // colon lit (the colon LEDs and the digit segments are separate).
+      // On the reference module both dots hang on COLON_DOT_DIGIT's decimal
+      // point line, so they always switch together. A module that exposes the
+      // two dots on two separate lines could light one per phase instead.
+      if (COLON_MODE == 0 || ((millis() / COLON_PERIOD_MS) % 2) == 0) {
+        buf[${colon_dot_digit}] |= 0x80;
       }
 
       // ---- auto-dimming from the BH1750 ------------------------------------
@@ -315,7 +356,14 @@ display:
           curve = 1.0f;
         }
 
-        int intensity = (int) (1.0f + 6.0f * curve + 0.5f);
+        int floor = (int) id(dim_min_intensity).state;
+        if (floor < 0) {
+          floor = 0;
+        } else if (floor > 7) {
+          floor = 7;
+        }
+
+        int intensity = (int) (floor + (7 - floor) * curve + 0.5f);
         if (intensity < 0) {
           intensity = 0;
         } else if (intensity > 7) {
@@ -323,12 +371,31 @@ display:
         }
         it.set_intensity((uint8_t) intensity);
 
+        // Report the brightness only when it changes. A sensor does not
+        // de-duplicate on its own and the display refreshes 4 times a second,
+        // so publishing unconditionally would flood the broker.
         static uint8_t last_intensity = 255;
         if ((uint8_t) intensity != last_intensity) {
           last_intensity = (uint8_t) intensity;
+          id(display_brightness).publish_state((float) intensity);
           ESP_LOGD("humidity_temp", "Display intensity %d for %.1f lx (gamma %.1f)", intensity, lux,
                    id(dim_gamma).state);
         }
+      }
+
+      // ---- calibration helper ----------------------------------------------
+      // Overrides everything above. The leftmost digit names the decimal-point
+      // index that is currently lit, 2 s per step:
+      //     shows "1" -> index 0, "2" -> index 1, "3" -> index 2, "4" -> index 3
+      // Watch which LED lights up while each digit is displayed, then set
+      // colon_dot_digit and colon_diagnostic: "false".
+      if (COLON_DIAGNOSTIC) {
+        const uint8_t probe = (millis() / 2000) % 4;
+        buf[0] = SEG_DIGIT[probe + 1];
+        buf[1] = SEG_BLANK;
+        buf[2] = SEG_BLANK;
+        buf[3] = SEG_BLANK;
+        buf[probe] |= 0x80;
       }
 
       it.set_buffer(buf, 4);

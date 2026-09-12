@@ -66,8 +66,8 @@ Notes:
 | Situation | What you see |
 | --- | --- |
 | Normal | `23:41` - temperature 23 °C, humidity 41 %RH |
-| Colon | One dot lit, the two dots swap every `colon_blink_period_ms` (default 800 ms) |
-| Humidity < min or > max | Digits 3-4 go dark and back on every `humidity_blink_period_ms` (default 800 ms). Digits 1-2 keep showing the temperature. The colon keeps alternating. |
+| Colon | Both dots sit on one decimal-point line, so they switch together: `colon_mode` `0` = permanently on, `1` (default) = blink every `colon_blink_period_ms` (800 ms) |
+| Humidity < min or > max | Digits 3-4 go dark and back on every `humidity_blink_period_ms` (default 800 ms). Digits 1-2 keep showing the temperature. The colon keeps its pattern. |
 | Temperature -1 .. -9 °C | `-5:41` |
 | Temperature <= -9.5 °C | `LO:41` |
 | Temperature >= 99.5 °C | `HI:41` |
@@ -80,12 +80,29 @@ blanking the humidity digits never blanks the colon dot.
 Auto-dimming, where `lux` is the BH1750 reading:
 
 ```
-intensity = 1 + 6 * clamp((lux - dim_lux_low) / (dim_lux_high - dim_lux_low), 0, 1) ^ dim_gamma
+intensity = dim_min_intensity
+          + (7 - dim_min_intensity) * clamp((lux - dim_lux_low) / (dim_lux_high - dim_lux_low), 0, 1) ^ dim_gamma
 ```
 
-`intensity` is the TM1637 brightness, `1` = dimmest and `7` = brightest, so the
-display is never fully dark. Setting **Dim Lux High** <= **Dim Lux Low** pins it
-to full brightness.
+`intensity` is the TM1637 brightness index, `0` to `7`. It selects the LED pulse
+width and is **not** a linear scale:
+
+| `intensity` | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Pulse width | 1/16 | 2/16 | 4/16 | 10/16 | 11/16 | 12/16 | 13/16 | 14/16 |
+
+**Intensity `0` is a valid level** - the dimmest pulse width, still illuminated,
+not "off". Switching the display off is a separate control bit that this
+configuration does not use. Because the hardware steps are non-linear (it jumps
+from 4/16 to 10/16 between index 2 and 3), `dim_gamma` shapes an index, not the
+perceived brightness.
+
+**Dim Min Intensity** sets the dark-room floor: `1` (the default) keeps the
+display softly visible, `0` drops to the dimmest duty. Setting **Dim Lux High**
+<= **Dim Lux Low** pins it to full brightness.
+
+The value actually applied is published as **Display Brightness**, `0` to `7`,
+whenever it changes.
 
 ---
 
@@ -107,6 +124,7 @@ mosquitto_sub -h <broker> -u <user> -P <pass> -t 'homeassistant/#' -v
 | Temperature (°C) | `humidity-temp/sensor/temperature/state` |
 | Humidity (%RH) | `humidity-temp/sensor/humidity/state` |
 | Illuminance (lx) | `humidity-temp/sensor/illuminance/state` |
+| Display brightness (0-7) | `humidity-temp/sensor/display_brightness/state` |
 | Humidity in comfort range (on/off) | `humidity-temp/binary_sensor/humidity_in_comfort_range/state` |
 | Online / offline (LWT) | `humidity-temp/status` |
 
@@ -127,8 +145,9 @@ mosquitto_pub -h <broker> -u <user> -P <pass> \
 | Dim Lux Low | `humidity-temp/number/dim_lux_low/command` | 10 | 1-100 | 1 | Lux at which the display is at its dimmest |
 | Dim Lux High | `humidity-temp/number/dim_lux_high/command` | 300 | 10-2000 | 10 | Lux at which the display is at its brightest |
 | Dim Gamma | `humidity-temp/number/dim_gamma/command` | 1.0 | 0.2-3.0 | 0.1 | Dimming curve coefficient; 1.0 = linear, > 1 dims earlier |
+| Dim Min Intensity | `humidity-temp/number/dim_min_intensity/command` | 1 | 0-7 | 1 | Brightness in a fully dark room; `0` = dimmest pulse width (1/16), not off |
 
-All five values are stored in flash and survive a reboot and an OTA update. A
+All six values are stored in flash and survive a reboot and an OTA update. A
 stored value always wins over the `initial_value` in the YAML.
 
 ---
@@ -167,31 +186,52 @@ least 8 characters.
 
 ---
 
-## Calibrating the colon dots
+## Colon dots
 
-The two colon dots are ordinary decimal-point LEDs of two digits, but *which*
-digit's decimal-point bit drives which dot depends on the module. The YAML
-exposes that mapping as two substitutions:
+On the reference module both colon dots are wired to the **same**
+decimal-point line, so they always light up and go dark together. Steering them
+separately is not possible - that is a wiring property of the module, not a
+software setting.
 
-```yaml
-colon_dot_upper_digit: "1"   # digit index 0..3, 0 = leftmost digit
-colon_dot_lower_digit: "2"
+`colon_dot_digit` says which digit's decimal-point bit drives the colon, and
+`colon_mode` picks the pattern:
+
+| `colon_mode` | Behaviour |
+| --- | --- |
+| `0` | Both dots permanently on |
+| `1` (default) | Both dots blink together, period `colon_blink_period_ms` |
+
+Measured on the reference module: decimal-point index **1** (the second digit
+from the left) lights both dots. Module vendors wire this differently, so
+`colon_dot_digit` is a substitution rather than a hard-coded constant.
+
+### Calibrating the colon
+
+If you swap the display, or the dots stay dark, re-measure with the built-in
+diagnostic. It ignores the sensors and, for 2 s per step, shows a digit that
+**names** the decimal-point index currently being lit:
+
+```bash
+uvx esphome -s colon_diagnostic true run humidity-temp.yaml
 ```
 
-The colon of a 4-digit module sits between digit 2 and digit 3, so the two
-candidates are index `1` and index `2`. To find out which is which:
+Watch which LED lights up while each digit is on screen:
 
-1. Set **both** substitutions to the same value, e.g. `"1"`, and flash.
-   With both equal the dot no longer alternates, it stays lit - easy to spot.
-2. Note which physical LED lights up: the upper colon dot, the lower colon dot,
-   or the decimal point of a digit.
-3. Repeat for `"0"`, `"2"` and `"3"`.
-4. Put the index that lights the **upper** dot into `colon_dot_upper_digit` and
-   the one that lights the **lower** dot into `colon_dot_lower_digit`, then
-   flash the final configuration.
+| Digit shown | Index lit | What you should see |
+| --- | --- | --- |
+| `1` | 0 | decimal point of digit 1 |
+| `2` | 1 | the colon dots, or nothing |
+| `3` | 2 | the colon dots, or nothing |
+| `4` | 3 | decimal point of digit 4 |
 
-If a dot ends up on a digit's own decimal point instead of the colon, the module
-simply does not expose that dot separately - pick the two indices that do.
+Note the **digit** that was on screen while the colon dots lit up - the index is
+that digit minus one - and put it into `colon_dot_digit`. Digits whose step
+lights nothing just mean the module has no LED on that line; that is normal for
+clock modules, which often omit the per-digit decimal points.
+
+Leave `colon_diagnostic: "false"` in the YAML, so a later build cannot silently
+ship the test pattern. The `-s` override is not stored anywhere and simply
+disappears on the next build.
 
 ---
 
@@ -206,7 +246,8 @@ simply does not expose that dot separately - pick the two indices that do.
 | AHT20 present but humidity is constantly NaN | Try `variant: AHT10`. Some chips labelled AHT10 need the AHT20 driver and vice versa. |
 | I2C read errors after long cable runs | Lower `i2c: frequency:` to `10kHz`. |
 | Humidity digits blink although the air feels fine | Humidity is outside the comfort band - check the `Humidity Min`/`Humidity Max` values. |
-| Display is very dim | The room is dark and the auto-dimming is working. Lower `Dim Lux Low`/`Dim Lux High`, or set `Dim Lux High` <= `Dim Lux Low` for full brightness. |
+| Display is very dim | The room is dark and the auto-dimming is working. Set `Dim Min Intensity` to `0` for the dimmest level, lower `Dim Lux Low`/`Dim Lux High`, or set `Dim Lux High` <= `Dim Lux Low` for full brightness. |
+| `Display Brightness` stays `unknown` | The BH1750 never returns a value, so the auto-dim never runs. See the BH1750 row above. |
 | Nothing in Home Assistant | MQTT discovery is enabled; make sure the broker credentials in `secrets.yaml` are correct and check the retained `homeassistant/#` topics. |
 
 To watch the auto-dimming decisions, set `logger: level: DEBUG`; the display logs
@@ -237,25 +278,36 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
 * I2C: SDA `GPIO4` (D2), SCL `GPIO5` (D1), 100 kHz.
 * TM1637: CLK `GPIO12` (D6), DIO `GPIO14` (D5), `update_interval: 250ms`.
 * Entities and IDs: `temperature`, `humidity` (aht10, `variant: AHT20`, 10 s);
-  `illuminance` (bh1750, 10 s); `humidity_in_comfort_range` (template
-  binary sensor, publish-only); `humidity_min` 40, `humidity_max` 60,
-  `dim_lux_low` 10, `dim_lux_high` 300, `dim_gamma` 1.0 (all template numbers,
-  `optimistic` + `restore_value` + `mode: BOX`).
+  `illuminance` (bh1750, 10 s); `display_brightness` (template sensor,
+  `update_interval: never`, published from the display lambda);
+  `humidity_in_comfort_range` (template binary sensor, publish-only);
+  `humidity_min` 40, `humidity_max` 60, `dim_lux_low` 10, `dim_lux_high` 300,
+  `dim_gamma` 1.0, `dim_min_intensity` 1 (all template numbers, `optimistic` +
+  `restore_value` + `mode: BOX`).
 * Display buffer: 4 raw TM1637 bytes, `bit0=A ... bit6=G, bit7=decimal point`.
   Digits 1-2 = temperature, digits 3-4 = humidity. Glyphs used: `0`-`9`
   (`0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F`), blank `0x00`,
   `-` `0x40`, `H` `0x76`, `I` `0x06`, `L` `0x38`, `O` `0x3F`.
 * Formatting: `NaN` -> `--`; temp `>99` -> `HI`, `<-9` -> `LO`, `-9..-1` ->
   `-` + digit, `0..99` -> two digits; humidity clamped to `>= 0`, `>99` -> `HI`.
-* Colon: `buf[colon_dot_upper_digit] |= 0x80` when `(millis()/800) % 2 == 0`,
-  otherwise `buf[colon_dot_lower_digit] |= 0x80`.
+* Colon: `buf[colon_dot_digit] |= 0x80` every refresh when `colon_mode == 0`,
+  and only on the even phase of `(millis()/800) % 2` when `colon_mode == 1`.
+  Both colon dots hang on that one decimal-point line - they cannot be lit
+  separately. `colon_diagnostic: true` overrides everything and shows a digit
+  naming the index being lit (`probe = (millis()/2000) % 4`, digit `probe + 1`,
+  with `buf[probe] |= 0x80`).
 * Humidity blink: blank `buf[2]` and `buf[3]` when humidity is outside
   `[humidity_min, humidity_max]` and `(millis()/800) % 2 == 1`.
-* Auto-dim: `intensity = clamp(round(1 + 6 * clamp((lux-low)/(high-low),0,1)^gamma), 0, 7)`;
-  skipped while `lux` is `NaN`; `high <= low` forces `7`.
+* Auto-dim: `floor = clamp(dim_min_intensity, 0, 7)`,
+  `intensity = clamp(round(floor + (7-floor) * clamp((lux-low)/(high-low),0,1)^gamma), 0, 7)`;
+  skipped while `lux` is `NaN`; `high <= low` forces `7`. Intensity `0` = 1/16
+  pulse width (dimmest, still lit), `7` = 14/16; the hardware duty table is
+  non-linear: `1/16, 2/16, 4/16, 10/16, 11/16, 12/16, 13/16, 14/16` for indices
+  `0..7`. Published to `display_brightness` only when it changes, never on every
+  refresh. Off is a separate control bit (`set_on(false)`) and is not used.
 * Constants: `display_update_ms 250`, `colon_blink_period_ms 800`,
-  `humidity_blink_period_ms 800`, `colon_dot_upper_digit 1`,
-  `colon_dot_lower_digit 2`.
+  `humidity_blink_period_ms 800`, `colon_mode 1`, `colon_diagnostic false`,
+  `colon_dot_digit 1` (measured on the reference module).
 * Requires ESPHome >= 2026.4 for `TM1637Display::set_buffer()`; developed
   against 2026.8.2.
 
