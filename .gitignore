@@ -1,0 +1,9 @@
+# Credentials - never commit
+secrets.yaml
+
+# ESPHome build artefacts and generated files
+.esphome/
+
+# Python
+__pycache__/
+*.pyc

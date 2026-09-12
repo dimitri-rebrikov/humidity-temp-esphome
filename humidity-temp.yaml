@@ -1,0 +1,334 @@
+# =============================================================================
+# humidity-temp.yaml - temperature / humidity / ambient light display node
+# =============================================================================
+#
+#   MCU     : ESP8266 (Wemos D1 Mini, 30-pin, 4 MB flash, CH340 USB)
+#             For ESP32 replace the "esp8266:" block with
+#                 esp32:
+#                   board: esp32dev
+#             and pick free I2C pins (the D1/D2 aliases below are ESP8266 only).
+#   Sensors : AHT20  temperature + relative humidity, I2C 0x38
+#             BH1750 illuminance,                    I2C 0x23
+#   Display : TM1637 4-digit 7-segment, 2-dot colon between the digit pairs
+#
+# Display layout:      [T][T]  :  [H][H]
+#                    temperature   humidity in %RH      (rounded to integers)
+#
+# Behaviour, MQTT topics, wiring and troubleshooting: see README.md.
+# =============================================================================
+
+substitutions:
+  device_name: humidity-temp
+  friendly_name: "Humidity Temp Monitor"
+
+  # Display refresh. Every refresh re-renders and bit-bangs the whole display,
+  # which blocks for roughly 10 ms - do not go much below 250 ms.
+  display_update_ms: "250"
+
+  # The colon has two dots. They blink alternately: exactly one dot is lit at
+  # any time, and the two swap every colon_blink_period_ms.
+  colon_blink_period_ms: "800"
+
+  # The humidity digits blink while the humidity is outside the comfort band.
+  humidity_blink_period_ms: "800"
+
+  # Which digit's decimal-point bit drives which colon dot. Digit indices are
+  # 0-based, i.e. 0..3 = digit 1..4 counted from the left.
+  # The colon of a 4-digit module sits between digit 2 and digit 3, so the two
+  # candidates are the decimal-point bits of index 1 and index 2.
+  # If the dots are swapped (or one stays dark), flip these two values - see
+  # "Calibrating the colon dots" in README.md.
+  colon_dot_upper_digit: "1"
+  colon_dot_lower_digit: "2"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp8266:
+  board: d1_mini
+
+# -----------------------------------------------------------------------------
+# Connectivity
+# -----------------------------------------------------------------------------
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+
+  # Fallback access point. Together with captive_portal this lets you reach
+  # http://192.168.4.1 and reconfigure WiFi when the network is unavailable.
+  ap:
+    ssid: "Humidity Temp Fallback"
+    password: !secret ota_password
+
+captive_portal:
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  discovery: true
+  discovery_prefix: homeassistant
+  topic_prefix: ${device_name}
+
+# Raise to DEBUG to see the auto-dimming decisions on the serial/OTA log.
+logger:
+  level: INFO
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# -----------------------------------------------------------------------------
+# I2C bus - shared by the AHT20 and the BH1750
+# -----------------------------------------------------------------------------
+
+i2c:
+  sda: GPIO4  # D2
+  scl: GPIO5  # D1
+  scan: true
+  # Both sensors are specified for 400 kHz. If the readings turn out flaky
+  # (long wires, weak pull-ups), drop this to 10kHz.
+  frequency: 100kHz
+
+# -----------------------------------------------------------------------------
+# Sensors
+# -----------------------------------------------------------------------------
+
+sensor:
+  - platform: aht10
+    variant: AHT20
+    update_interval: 10s
+    temperature:
+      name: "Temperature"
+      id: temperature
+    humidity:
+      name: "Humidity"
+      id: humidity
+
+  - platform: bh1750
+    name: "Illuminance"
+    id: illuminance
+    update_interval: 10s
+
+# -----------------------------------------------------------------------------
+# Runtime configuration (all values are restored across reboots)
+# -----------------------------------------------------------------------------
+
+number:
+  # Comfort band. Humidity outside [min, max] makes the humidity digits blink
+  # and clears the "Humidity In Comfort Range" binary sensor.
+  - platform: template
+    name: "Humidity Min"
+    id: humidity_min
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    min_value: 0
+    max_value: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: BOX
+
+  - platform: template
+    name: "Humidity Max"
+    id: humidity_max
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+    min_value: 0
+    max_value: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: BOX
+
+  # Auto-dimming curve:
+  #   intensity = 1 + 6 * clamp((lux - low) / (high - low), 0 .. 1) ^ gamma
+  # 1 = dimmest, 7 = brightest. Setting "Dim Lux High" <= "Dim Lux Low" forces
+  # full brightness.
+  - platform: template
+    name: "Dim Lux Low"
+    id: dim_lux_low
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 100
+    step: 1
+    unit_of_measurement: "lx"
+    mode: BOX
+
+  - platform: template
+    name: "Dim Lux High"
+    id: dim_lux_high
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 10
+    max_value: 2000
+    step: 10
+    unit_of_measurement: "lx"
+    mode: BOX
+
+  # Curve coefficient. 1.0 = linear, > 1 dims earlier, < 1 brightens earlier.
+  - platform: template
+    name: "Dim Gamma"
+    id: dim_gamma
+    optimistic: true
+    restore_value: true
+    initial_value: 1.0
+    min_value: 0.2
+    max_value: 3.0
+    step: 0.1
+    mode: BOX
+
+# -----------------------------------------------------------------------------
+# Comfort state (publish-only, driven from the display lambda)
+# -----------------------------------------------------------------------------
+
+binary_sensor:
+  - platform: template
+    name: "Humidity In Comfort Range"
+    id: humidity_in_comfort_range
+
+# -----------------------------------------------------------------------------
+# TM1637 4-digit display
+# -----------------------------------------------------------------------------
+
+display:
+  - platform: tm1637
+    id: tm_display
+    clk_pin: D6  # GPIO12
+    dio_pin: D5  # GPIO14
+    update_interval: ${display_update_ms}ms
+    lambda: |-
+      // -----------------------------------------------------------------------
+      // 7-segment glyphs.
+      //
+      // Written as raw bytes through it.set_buffer() so that every digit *and*
+      // every decimal point is controlled separately. set_buffer() needs
+      // ESPHome >= 2026.4 (it is not available in older releases).
+      //
+      // TM1637 raw byte layout for a non-inverted display:
+      //     bit0=A bit1=B bit2=C bit3=D bit4=E bit5=F bit6=G bit7=decimal point
+      // -----------------------------------------------------------------------
+      static const uint8_t SEG_DIGIT[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66,
+                                            0x6D, 0x7D, 0x07, 0x7F, 0x6F};
+      static const uint8_t SEG_BLANK = 0x00;    // nothing
+      static const uint8_t SEG_MINUS = 0x40;    // '-'
+      static const uint8_t SEG_H = 0x76;        // 'H'
+      static const uint8_t SEG_I = 0x06;        // 'I'
+      static const uint8_t SEG_L = 0x38;        // 'L'
+      static const uint8_t SEG_O = 0x3F;        // 'O'
+      static const uint8_t SEG_UNKNOWN = 0x40;  // '-' while a value is unavailable
+
+      static const uint32_t COLON_PERIOD_MS = ${colon_blink_period_ms};
+      static const uint32_t HUMIDITY_PERIOD_MS = ${humidity_blink_period_ms};
+
+      uint8_t buf[4] = {SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK};
+
+      // ---- digits 1-2: temperature ------------------------------------------
+      // NOTE: local names must not collide with ESPHome entity IDs, otherwise
+      // the generated "temperature->state" lookup would resolve to the local.
+      const float temp_c = id(temperature).state;
+      if (std::isnan(temp_c)) {
+        buf[0] = SEG_UNKNOWN;
+        buf[1] = SEG_UNKNOWN;
+      } else {
+        const int value = (int) (temp_c < 0 ? temp_c - 0.5f : temp_c + 0.5f);
+        if (value > 99) {
+          buf[0] = SEG_H;
+          buf[1] = SEG_I;
+        } else if (value < -9) {
+          buf[0] = SEG_L;
+          buf[1] = SEG_O;
+        } else if (value < 0) {
+          buf[0] = SEG_MINUS;
+          buf[1] = SEG_DIGIT[-value];
+        } else {
+          buf[0] = SEG_DIGIT[value / 10];
+          buf[1] = SEG_DIGIT[value % 10];
+        }
+      }
+
+      // ---- digits 3-4: relative humidity ------------------------------------
+      const float rh = id(humidity).state;
+      const bool rh_valid = !std::isnan(rh);
+      if (rh_valid) {
+        int value = (int) (rh + 0.5f);
+        if (value < 0) {
+          value = 0;  // keep the SEG_DIGIT index in range
+        }
+        if (value > 99) {
+          buf[2] = SEG_H;
+          buf[3] = SEG_I;
+        } else {
+          buf[2] = SEG_DIGIT[value / 10];
+          buf[3] = SEG_DIGIT[value % 10];
+        }
+      }
+
+      // ---- comfort band -----------------------------------------------------
+      // Nothing is published until the first valid reading, so Home Assistant
+      // shows "unknown" instead of a spurious "off".
+      if (rh_valid) {
+        const bool in_comfort = rh >= id(humidity_min).state && rh <= id(humidity_max).state;
+        id(humidity_in_comfort_range).publish_state(in_comfort);
+
+        // Outside the band the humidity digits blink - slow, and only during
+        // the dark half of the period. The temperature digits stay readable.
+        if (!in_comfort && ((millis() / HUMIDITY_PERIOD_MS) % 2) == 1) {
+          buf[2] = SEG_BLANK;
+          buf[3] = SEG_BLANK;
+        }
+      }
+
+      // ---- colon: alternate the two dots -----------------------------------
+      // Applied after the blink, so a blanked humidity digit still leaves its
+      // colon dot lit (the colon LEDs and the digit segments are separate).
+      if (((millis() / COLON_PERIOD_MS) % 2) == 0) {
+        buf[${colon_dot_upper_digit}] |= 0x80;
+      } else {
+        buf[${colon_dot_lower_digit}] |= 0x80;
+      }
+
+      // ---- auto-dimming from the BH1750 ------------------------------------
+      const float lux = id(illuminance).state;
+      if (!std::isnan(lux)) {
+        const float lux_low = id(dim_lux_low).state;
+        const float lux_high = id(dim_lux_high).state;
+
+        float factor = 1.0f;
+        if (lux_high > lux_low) {
+          factor = (lux - lux_low) / (lux_high - lux_low);
+          if (factor < 0.0f) {
+            factor = 0.0f;
+          } else if (factor > 1.0f) {
+            factor = 1.0f;
+          }
+        }
+
+        float curve = std::pow(factor, id(dim_gamma).state);
+        if (std::isnan(curve)) {
+          curve = 1.0f;
+        }
+
+        int intensity = (int) (1.0f + 6.0f * curve + 0.5f);
+        if (intensity < 0) {
+          intensity = 0;
+        } else if (intensity > 7) {
+          intensity = 7;
+        }
+        it.set_intensity((uint8_t) intensity);
+
+        static uint8_t last_intensity = 255;
+        if ((uint8_t) intensity != last_intensity) {
+          last_intensity = (uint8_t) intensity;
+          ESP_LOGD("humidity_temp", "Display intensity %d for %.1f lx (gamma %.1f)", intensity, lux,
+                   id(dim_gamma).state);
+        }
+      }
+
+      it.set_buffer(buf, 4);
