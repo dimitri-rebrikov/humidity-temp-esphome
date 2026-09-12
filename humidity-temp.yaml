@@ -336,11 +336,33 @@ display:
       }
 
       // ---- auto-dimming from the BH1750 ------------------------------------
+      // The tuning inputs are sanitised first. Without this a parameter that is
+      // still NaN (or nonsense) falls through to "full brightness" and looks
+      // like the display ignoring every setting, with no hint why.
+      float lux_low = id(dim_lux_low).state;
+      float lux_high = id(dim_lux_high).state;
+      float gamma = id(dim_gamma).state;
+      int min_level = (int) id(dim_min_intensity).state;
+
+      if (std::isnan(lux_low)) {
+        lux_low = 10.0f;
+      }
+      if (std::isnan(lux_high)) {
+        lux_high = 300.0f;
+      }
+      if (std::isnan(gamma) || gamma <= 0.0f) {
+        gamma = 1.0f;
+      }
+      if (min_level < 0) {
+        min_level = 0;
+      } else if (min_level > 7) {
+        min_level = 7;
+      }
+
       const float lux = id(illuminance).state;
       if (!std::isnan(lux)) {
-        const float lux_low = id(dim_lux_low).state;
-        const float lux_high = id(dim_lux_high).state;
-
+        // lux_high <= lux_low is a deliberate escape hatch: full brightness at
+        // any light level.
         float factor = 1.0f;
         if (lux_high > lux_low) {
           factor = (lux - lux_low) / (lux_high - lux_low);
@@ -351,19 +373,12 @@ display:
           }
         }
 
-        float curve = std::pow(factor, id(dim_gamma).state);
-        if (std::isnan(curve)) {
+        float curve = std::pow(factor, gamma);
+        if (!(curve >= 0.0f && curve <= 1.0f)) {  // also catches NaN
           curve = 1.0f;
         }
 
-        int floor = (int) id(dim_min_intensity).state;
-        if (floor < 0) {
-          floor = 0;
-        } else if (floor > 7) {
-          floor = 7;
-        }
-
-        int intensity = (int) (floor + (7 - floor) * curve + 0.5f);
+        int intensity = (int) (min_level + (7 - min_level) * curve + 0.5f);
         if (intensity < 0) {
           intensity = 0;
         } else if (intensity > 7) {
@@ -371,15 +386,22 @@ display:
         }
         it.set_intensity((uint8_t) intensity);
 
-        // Report the brightness only when it changes. A sensor does not
-        // de-duplicate on its own and the display refreshes 4 times a second,
-        // so publishing unconditionally would flood the broker.
-        static uint8_t last_intensity = 255;
-        if ((uint8_t) intensity != last_intensity) {
-          last_intensity = (uint8_t) intensity;
+        // Report only when the brightness changes. A sensor does not
+        // de-duplicate, the display refreshes 4 times a second, and the log
+        // line at INFO is the only way to see why a level was chosen.
+        static int8_t last_intensity = -1;
+        if ((int8_t) intensity != last_intensity) {
+          last_intensity = (int8_t) intensity;
           id(display_brightness).publish_state((float) intensity);
-          ESP_LOGD("humidity_temp", "Display intensity %d for %.1f lx (gamma %.1f)", intensity, lux,
-                   id(dim_gamma).state);
+          ESP_LOGI("humidity_temp",
+                   "Display intensity %d (%.1f lx, lux_low %.0f, lux_high %.0f, gamma %.2f, min %d)",
+                   intensity, lux, lux_low, lux_high, gamma, min_level);
+        }
+      } else {
+        static bool warned_missing_lux = false;
+        if (!warned_missing_lux) {
+          warned_missing_lux = true;
+          ESP_LOGW("humidity_temp", "Auto-dim idle: no illuminance reading, keeping the boot brightness");
         }
       }
 

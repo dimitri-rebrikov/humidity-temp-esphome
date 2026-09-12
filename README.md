@@ -247,11 +247,23 @@ disappears on the next build.
 | I2C read errors after long cable runs | Lower `i2c: frequency:` to `10kHz`. |
 | Humidity digits blink although the air feels fine | Humidity is outside the comfort band - check the `Humidity Min`/`Humidity Max` values. |
 | Display is very dim | The room is dark and the auto-dimming is working. Set `Dim Min Intensity` to `0` for the dimmest level, lower `Dim Lux Low`/`Dim Lux High`, or set `Dim Lux High` <= `Dim Lux Low` for full brightness. |
-| `Display Brightness` stays `unknown` | The BH1750 never returns a value, so the auto-dim never runs. See the BH1750 row above. |
+| `Display Brightness` stays `unknown` | The BH1750 never returns a value, so the auto-dim never runs. The log says so at WARNING level. See the BH1750 row above. |
+| `Display Brightness` is stuck at `7` and no setting helps | Read the `INFO` log line - it prints every input. Setting `Dim Lux High` <= `Dim Lux Low` deliberately forces full brightness; otherwise raise `Dim Lux High` or lower `Dim Lux Low`. |
 | Nothing in Home Assistant | MQTT discovery is enabled; make sure the broker credentials in `secrets.yaml` are correct and check the retained `homeassistant/#` topics. |
 
-To watch the auto-dimming decisions, set `logger: level: DEBUG`; the display logs
-its intensity whenever it changes.
+Whenever the brightness changes, the device logs the result **and every input
+that produced it**, at `INFO` level, so the configured `logger: level: INFO` is
+enough:
+
+```
+[I][humidity_temp:...] Display intensity 3 (120.0 lx, lux_low 10, lux_high 300, gamma 1.00, min 1)
+```
+
+Watch it live with:
+
+```bash
+uvx esphome logs humidity-temp.yaml
+```
 
 ---
 
@@ -298,13 +310,17 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   with `buf[probe] |= 0x80`).
 * Humidity blink: blank `buf[2]` and `buf[3]` when humidity is outside
   `[humidity_min, humidity_max]` and `(millis()/800) % 2 == 1`.
-* Auto-dim: `floor = clamp(dim_min_intensity, 0, 7)`,
+* Auto-dim: the four tuning inputs are sanitised first - a `NaN` or nonsense
+  parameter is replaced by its default instead of silently falling through to
+  full brightness. Then `floor = clamp(dim_min_intensity, 0, 7)`,
   `intensity = clamp(round(floor + (7-floor) * clamp((lux-low)/(high-low),0,1)^gamma), 0, 7)`;
-  skipped while `lux` is `NaN`; `high <= low` forces `7`. Intensity `0` = 1/16
-  pulse width (dimmest, still lit), `7` = 14/16; the hardware duty table is
-  non-linear: `1/16, 2/16, 4/16, 10/16, 11/16, 12/16, 13/16, 14/16` for indices
-  `0..7`. Published to `display_brightness` only when it changes, never on every
-  refresh. Off is a separate control bit (`set_on(false)`) and is not used.
+  skipped while `lux` is `NaN` (logged once at WARNING). `high <= low`
+  deliberately forces `7`. Intensity `0` = 1/16 pulse width (dimmest, still lit),
+  `7` = 14/16; the hardware duty table is non-linear:
+  `1/16, 2/16, 4/16, 10/16, 11/16, 12/16, 13/16, 14/16` for indices `0..7`.
+  Published to `display_brightness` and logged at `INFO` only when it changes,
+  never on every refresh. Off is a separate control bit (`set_on(false)`) and is
+  not used.
 * Constants: `display_update_ms 250`, `colon_blink_period_ms 800`,
   `humidity_blink_period_ms 800`, `colon_mode 1`, `colon_diagnostic false`,
   `colon_dot_digit 1` (measured on the reference module).
