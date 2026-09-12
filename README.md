@@ -106,6 +106,26 @@ whenever it changes.
 
 ---
 
+## Temperature calibration
+
+The AHT20 reading is off by a constant in most builds - self-heating, the
+enclosure, cable routing. **Temperature Offset** shifts it: `-10` to `+10` °C in
+`0.1` steps, default `0`.
+
+```bash
+mosquitto_pub -h <broker> -u <user> -P <pass> \
+  -t 'humidity-temp/number/temperature_offset/command' -m '-1.5'
+```
+
+The offset is a sensor filter on the AHT20 temperature, not a display trick, so
+the panel, the published MQTT state and Home Assistant all show the same
+corrected value - one number to trust, no second source of truth. A new offset
+takes effect on the next sensor update, so allow up to `10 s`.
+
+Humidity is not calibrated.
+
+---
+
 ## MQTT interface
 
 `mqtt.topic_prefix` is `humidity-temp`, so every entity is reachable at
@@ -140,6 +160,7 @@ mosquitto_pub -h <broker> -u <user> -P <pass> \
 
 | Entity | Command topic | Default | Range | Step | Effect |
 | --- | --- | --- | --- | --- | --- |
+| Temperature Offset | `humidity-temp/number/temperature_offset/command` | 0 | -10..10 | 0.1 | Calibration added to the AHT20 temperature (°C) |
 | Humidity Min | `humidity-temp/number/humidity_min/command` | 40 | 0-100 | 1 | Lower edge of the comfort band (%RH) |
 | Humidity Max | `humidity-temp/number/humidity_max/command` | 60 | 0-100 | 1 | Upper edge of the comfort band (%RH) |
 | Dim Lux Low | `humidity-temp/number/dim_lux_low/command` | 10 | 1-100 | 1 | Lux at which the display is at its dimmest |
@@ -147,7 +168,7 @@ mosquitto_pub -h <broker> -u <user> -P <pass> \
 | Dim Gamma | `humidity-temp/number/dim_gamma/command` | 1.0 | 0.2-3.0 | 0.1 | Dimming curve coefficient; 1.0 = linear, > 1 dims earlier |
 | Dim Min Intensity | `humidity-temp/number/dim_min_intensity/command` | 1 | 0-7 | 1 | Brightness in a fully dark room; `0` = dimmest pulse width (1/16), not off |
 
-All six values are stored in flash and survive a reboot and an OTA update. A
+All seven values are stored in flash and survive a reboot and an OTA update. A
 stored value always wins over the `initial_value` in the YAML.
 
 ---
@@ -293,9 +314,10 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   `illuminance` (bh1750, 10 s); `display_brightness` (template sensor,
   `update_interval: never`, published from the display lambda);
   `humidity_in_comfort_range` (template binary sensor, publish-only);
-  `humidity_min` 40, `humidity_max` 60, `dim_lux_low` 10, `dim_lux_high` 300,
-  `dim_gamma` 1.0, `dim_min_intensity` 1 (all template numbers, `optimistic` +
-  `restore_value` + `mode: BOX`).
+  `humidity_min` 40, `humidity_max` 60, `temperature_offset` 0,
+  `dim_lux_low` 10, `dim_lux_high` 300, `dim_gamma` 1.0,
+  `dim_min_intensity` 1 (all template numbers, `optimistic` + `restore_value` +
+  `mode: BOX`).
 * Display buffer: 4 raw TM1637 bytes, `bit0=A ... bit6=G, bit7=decimal point`.
   Digits 1-2 = temperature, digits 3-4 = humidity. Glyphs used: `0`-`9`
   (`0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F`), blank `0x00`,
@@ -308,6 +330,10 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   separately. `colon_diagnostic: true` overrides everything and shows a digit
   naming the index being lit (`probe = (millis()/2000) % 4`, digit `probe + 1`,
   with `buf[probe] |= 0x80`).
+* Temperature calibration: `sensor::OffsetFilter` on the AHT20 `temperature`
+  (`filters: - offset: !lambda return id(temperature_offset).state;`), so the
+  display, MQTT state and HA all report the corrected value. Range -10..10 °C in
+  0.1 steps, applied on the next 10 s sensor update, not instantly.
 * Humidity blink: blank `buf[2]` and `buf[3]` when humidity is outside
   `[humidity_min, humidity_max]` and `(millis()/800) % 2 == 1`.
 * Auto-dim: the four tuning inputs are sanitised first - a `NaN` or nonsense

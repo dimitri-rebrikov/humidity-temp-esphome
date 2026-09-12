@@ -114,6 +114,13 @@ sensor:
     temperature:
       name: "Temperature"
       id: temperature
+      # Calibration offset, adjustable over MQTT. Applied here rather than in the
+      # display so the panel, the MQTT state and Home Assistant all report the
+      # same corrected value. A new offset takes effect on the next sensor
+      # update (10 s), not instantly.
+      filters:
+        - offset: !lambda |-
+            return id(temperature_offset).state;
     humidity:
       name: "Humidity"
       id: humidity
@@ -137,6 +144,19 @@ sensor:
 # -----------------------------------------------------------------------------
 
 number:
+  # Temperature calibration offset in °C, added to the AHT20 reading.
+  - platform: template
+    name: "Temperature Offset"
+    id: temperature_offset
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: -10
+    max_value: 10
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: BOX
+
   # Comfort band. Humidity outside [min, max] makes the humidity digits blink
   # and clears the "Humidity In Comfort Range" binary sensor.
   - platform: template
