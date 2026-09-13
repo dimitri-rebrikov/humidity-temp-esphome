@@ -143,6 +143,42 @@ sensor:
     humidity:
       name: "Humidity"
       id: humidity
+      # Relative humidity is only defined relative to a temperature. The AHT20
+      # measures it at the chip's own temperature, while "temperature" above is
+      # published offset-corrected - so without this conversion the two numbers
+      # would describe air at two different temperatures. Magnus saturation
+      # pressure ratio; offset 0 is the identity.
+      #
+      # Requires the temperature filter above to be exactly "offset" (t_chip is
+      # derived as t_air - offset). The driver publishes temperature before
+      # humidity from the same measurement, so state is already up to date here.
+      filters:
+        - lambda: |-
+            if (std::isnan(x)) {
+              return x;
+            }
+            const float t_air = id(temperature).state;  // already offset-corrected
+            if (std::isnan(t_air)) {
+              return x;  // nothing to convert to
+            }
+            const float offset = id(temperature_offset).state;
+            if (std::isnan(offset) || offset == 0.0f) {
+              return x;  // identity, or no usable offset
+            }
+            auto sat_pressure = [](float t) {
+              return 6.112f * std::exp(17.62f * t / (243.12f + t));  // hPa
+            };
+            const float t_chip = t_air - offset;
+            float rh = x * sat_pressure(t_chip) / sat_pressure(t_air);
+            if (std::isnan(rh)) {
+              return x;  // degenerate result, keep the raw reading
+            }
+            if (rh < 0.0f) {
+              rh = 0.0f;
+            } else if (rh > 100.0f) {
+              rh = 100.0f;  // saturation; RH cannot exceed 100 %
+            }
+            return rh;
 
   - platform: bh1750
     name: "Illuminance"
@@ -163,7 +199,9 @@ sensor:
 # -----------------------------------------------------------------------------
 
 number:
-  # Temperature calibration offset in °C, added to the AHT20 reading.
+  # Temperature calibration offset in °C, added to the AHT20 reading. It also
+  # converts the humidity reading to the reported temperature - see the humidity
+  # filter in the sensor section.
   - platform: template
     name: "Temperature Offset"
     id: temperature_offset

@@ -124,7 +124,35 @@ the panel, the published MQTT state and Home Assistant all show the same
 corrected value - one number to trust, no second source of truth. A new offset
 takes effect on the next sensor update, so allow up to `10 s`.
 
-Humidity is not calibrated.
+### Humidity follows the temperature
+
+Relative humidity is only defined *relative to a temperature*, and the AHT20
+measures it at the chip's own temperature - the very temperature Temperature
+Offset corrects. Left alone, the panel would report air at two different
+temperatures: `22.0` °C next to a `45 %RH` that actually belongs to `23.5` °C.
+
+So the humidity entity carries a second filter that converts the reading from
+the chip temperature to the reported temperature, using the Magnus saturation
+pressure ratio:
+
+```
+RH_reported = RH_measured * e_s(t_reported - offset) / e_s(t_reported)
+e_s(T) = 6.112 * exp(17.62 * T / (243.12 + T))     [hPa, over water]
+```
+
+* `offset = 0` is the identity - the reading passes through untouched.
+* A **negative** offset (chip warmer than the air) raises the reported humidity,
+  a positive one lowers it: offset `-1.5` turns `45 %RH` into roughly `49 %RH`.
+* The result is clamped to `0..100 %RH` - saturation is a physical limit.
+* If the temperature is unavailable (`NaN`) the humidity is published
+  unconverted.
+* Same filter, so the display, MQTT and Home Assistant agree, and the comfort
+  band and its blink use the corrected value.
+
+This keeps the temperature/humidity pair self-consistent; it is not an
+independent humidity calibration. The conversion assumes the temperature filter
+is exactly the offset above (`t_chip = t_reported - offset`), so a different
+temperature filter needs a matching humidity filter.
 
 ### The AHT20's own calibration
 
@@ -194,7 +222,7 @@ mosquitto_pub -h <broker> -u <user> -P <pass> \
 
 | Entity | Command topic | Default | Range | Step | Effect |
 | --- | --- | --- | --- | --- | --- |
-| Temperature Offset | `humidity-temp/number/temperature_offset/command` | 0 | -10..10 | 0.1 | Calibration added to the AHT20 temperature (°C) |
+| Temperature Offset | `humidity-temp/number/temperature_offset/command` | 0 | -10..10 | 0.1 | Calibration added to the AHT20 temperature (°C); the humidity reading is converted to that temperature |
 | Humidity Min | `humidity-temp/number/humidity_min/command` | 40 | 0-100 | 1 | Lower edge of the comfort band (%RH) |
 | Humidity Max | `humidity-temp/number/humidity_max/command` | 60 | 0-100 | 1 | Upper edge of the comfort band (%RH) |
 | Dim Lux Low | `humidity-temp/number/dim_lux_low/command` | 10 | 1-100 | 1 | Lux at which the display is at its dimmest |
@@ -313,6 +341,7 @@ disappears on the next build.
 | `Initialization failed` at boot | The AHT20 did not report the calibrated flag (status bit 3) or is not in normal mode (`[6:5]` = `00`). Reset the board; if it persists, check wiring and power, and try `variant: AHT10`. |
 | `Initialization timed out` at boot | The sensor stayed busy longer than the ~50 ms the driver allows. Same checks as above. |
 | `Invalid humidity reading (0%)` in the log | The AHT20 reported exactly `0 %RH`, which it cannot really measure, so the reading is discarded. |
+| Humidity reads a few %RH away from a reference | Expected while Temperature Offset is non-zero: the reading is converted to the corrected temperature. Set the offset to `0` to compare raw values. |
 | I2C read errors after long cable runs | Lower `i2c: frequency:` to `10kHz`. |
 | Humidity digits blink although the air feels fine | Humidity is outside the comfort band - check the `Humidity Min`/`Humidity Max` values. |
 | Display is very dim | The room is dark and the auto-dimming is working. Set `Dim Min Intensity` to `0` for the dimmest level, lower `Dim Lux Low`/`Dim Lux High`, or set `Dim Lux High` <= `Dim Lux Low` for full brightness. |
@@ -383,6 +412,14 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   (`filters: - offset: !lambda return id(temperature_offset).state;`), so the
   display, MQTT state and HA all report the corrected value. Range -10..10 °C in
   0.1 steps, applied on the next 10 s sensor update, not instantly.
+* Humidity conversion: a `lambda` filter on the AHT20 `humidity` converts the
+  reading from the chip temperature to the reported one,
+  `rh = x * e_s(t - offset) / e_s(t)` with Magnus
+  `e_s(T) = 6.112 * exp(17.62 * T / (243.12 + T))` hPa, `t = id(temperature).state`
+  (already offset-corrected; the driver publishes temperature before humidity for
+  the same measurement). Identity at `offset == 0`, result clamped to `0..100`,
+  and `x` returned unchanged when `x` or `t` is `NaN`. Assumes the temperature
+  filter is exactly the offset filter.
 * AHT20 calibration is **boot-only and not runtime-accessible**: ESPHome sends
   soft reset `0xBA`, then `0xBE 0x08 0x00` (`0xE1 0x08 0x00` for AHT10), polls
   busy (`0x80`) up to 10x5 ms, then requires `(status & 0x68) == 0x08` (mode
