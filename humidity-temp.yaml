@@ -48,7 +48,10 @@ substitutions:
   # While the node has no WiFi (router down, out of range, wrong credentials)
   # the colon blinks fast and ignores colon_mode. It is the only status the
   # node can still signal without any network.
-  wifi_blink_period_ms: "150"
+  # Keep this a multiple of display_update_ms: the display samples the phase
+  # only every 250 ms, so anything faster blinks irregularly instead of fast.
+  # 250 = the dots toggle on every single refresh.
+  wifi_blink_period_ms: "250"
 
   # Calibration helper. While "true" the display ignores temperature and
   # humidity. For 2 s per step it shows a digit that names the decimal-point

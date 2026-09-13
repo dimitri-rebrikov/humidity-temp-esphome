@@ -10,7 +10,7 @@ on a 4-digit 7-segment display and publishes everything to MQTT.
 
 * **Temperature** on digits 1-2, **humidity** on digits 3-4 (both rounded to integers).
 * The **two colon dots blink** every 800 ms. Without WiFi they blink **fast**
-  (150 ms) as an offline indicator.
+  (250 ms) as an offline indicator.
 * If the humidity leaves the **comfort band** (default 40-60 %RH, adjustable over
   MQTT) the **humidity digits blink** slowly.
 * A BH1750 ambient light sensor **auto-dims the display** so it is readable but
@@ -68,7 +68,7 @@ Notes:
 | --- | --- |
 | Normal | `23:41` - temperature 23 °C, humidity 41 %RH |
 | Colon | Both dots sit on one decimal-point line, so they switch together: `colon_mode` `0` = permanently on, `1` (default) = blink every `colon_blink_period_ms` (800 ms) |
-| No WiFi | The colon blinks fast, period `wifi_blink_period_ms` (150 ms), and overrides `colon_mode`. Back to normal as soon as WiFi associates again. |
+| No WiFi | The colon blinks fast, period `wifi_blink_period_ms` (250 ms), and overrides `colon_mode`. Back to normal as soon as WiFi associates again. |
 | Humidity < min or > max | Digits 3-4 go dark and back on every `humidity_blink_period_ms` (default 800 ms). Digits 1-2 keep showing the temperature. The colon keeps its pattern. |
 | Temperature -1 .. -9 °C | `-5:41` |
 | Temperature <= -9.5 °C | `LO:41` |
@@ -257,10 +257,15 @@ software setting.
 | `1` (default) | Both dots blink together, period `colon_blink_period_ms` |
 
 Independently of `colon_mode`, the colon blinks fast (period
-`wifi_blink_period_ms`, default 150 ms) while `wifi::global_wifi_component`
+`wifi_blink_period_ms`, default 250 ms) while `wifi::global_wifi_component`
 reports **not connected**. That is the only status the node can signal without a
 network, so it takes precedence - including over `colon_mode: 0`. Connection is
 decided by WiFi association, not by MQTT or the API being reachable.
+
+Keep `wifi_blink_period_ms` a **multiple of `display_update_ms`** (250 ms). The
+panel is only re-rendered every 250 ms, so a shorter period is undersampled and
+produces an irregular flicker instead of a clean fast blink. `250` is the
+fastest alias-free value: the dots then toggle on every single refresh.
 
 Measured on the reference module: decimal-point index **1** (the second digit
 from the left) lights both dots. Module vendors wire this differently, so
@@ -371,7 +376,7 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   and only on the even phase of `(millis()/800) % 2` when `colon_mode == 1`.
   Both colon dots hang on that one decimal-point line - they cannot be lit
   separately. While `wifi::global_wifi_component->is_connected()` is false the
-  phase uses `wifi_blink_period_ms` (150 ms) and `colon_mode` is ignored. `colon_diagnostic: true` overrides everything and shows a digit
+  phase uses `wifi_blink_period_ms` (250 ms) and `colon_mode` is ignored. `colon_diagnostic: true` overrides everything and shows a digit
   naming the index being lit (`probe = (millis()/2000) % 4`, digit `probe + 1`,
   with `buf[probe] |= 0x80`).
 * Temperature calibration: `sensor::OffsetFilter` on the AHT20 `temperature`
@@ -400,7 +405,7 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   never on every refresh. Off is a separate control bit (`set_on(false)`) and is
   not used.
 * Constants: `display_update_ms 250`, `colon_blink_period_ms 800`,
-  `wifi_blink_period_ms 150`, `humidity_blink_period_ms 800`, `colon_mode 1`,
+  `wifi_blink_period_ms 250`, `humidity_blink_period_ms 800`, `colon_mode 1`,
   `colon_diagnostic false`, `colon_dot_digit 1` (measured on the reference
   module).
 * `esp8266: restore_from_flash: true` - the default (`false`) keeps restored
