@@ -57,6 +57,12 @@ esphome:
 
 esp8266:
   board: d1_mini
+  # Default is false -> restored values live in RTC memory, which survives a
+  # reboot/deep-sleep but NOT a real power cut. Switching the module off made
+  # every number (offsets, comfort band, dim curve) fall back to initial_value.
+  # With this enabled the preferences are written to flash and survive both.
+  # Flash is only written when a value actually changes, so wear stays low.
+  restore_from_flash: true
 
 # -----------------------------------------------------------------------------
 # Connectivity
@@ -74,6 +80,11 @@ wifi:
     password: !secret ota_password
 
 captive_portal:
+
+# Native ESPHome API (Home Assistant integration alongside MQTT).
+api:
+  encryption:
+    key: !secret esphome_api_key
 
 mqtt:
   broker: !secret mqtt_broker
