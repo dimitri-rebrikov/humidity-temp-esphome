@@ -9,7 +9,8 @@ on a 4-digit 7-segment display and publishes everything to MQTT.
 ```
 
 * **Temperature** on digits 1-2, **humidity** on digits 3-4 (both rounded to integers).
-* The **two colon dots blink alternately** - exactly one dot is lit at a time.
+* The **two colon dots blink** every 800 ms. Without WiFi they blink **fast**
+  (150 ms) as an offline indicator.
 * If the humidity leaves the **comfort band** (default 40-60 %RH, adjustable over
   MQTT) the **humidity digits blink** slowly.
 * A BH1750 ambient light sensor **auto-dims the display** so it is readable but
@@ -26,7 +27,7 @@ on a 4-digit 7-segment display and publishes everything to MQTT.
 | Configuration | Everything sits in one file, `humidity-temp.yaml`. No `packages:`, no custom C++. |
 | Display rendering | Raw segment bytes via `TM1637Display::set_buffer()`, which gives per-digit control including the decimal-point bits. Requires **ESPHome >= 2026.4**. |
 | Runtime configuration | ESPHome `number` entities (`optimistic`, `restore_value`), so the values survive a reboot and can be changed over MQTT at any time. |
-| Protocols | MQTT only - no native API, no web server. WiFi SSID/password and MQTT credentials come from `secrets.yaml`. |
+| Protocols | Native ESPHome API (encrypted, Home Assistant) and MQTT. No web server. WiFi SSID/password, MQTT credentials and the API key come from `secrets.yaml`. |
 
 ---
 
@@ -67,6 +68,7 @@ Notes:
 | --- | --- |
 | Normal | `23:41` - temperature 23 °C, humidity 41 %RH |
 | Colon | Both dots sit on one decimal-point line, so they switch together: `colon_mode` `0` = permanently on, `1` (default) = blink every `colon_blink_period_ms` (800 ms) |
+| No WiFi | The colon blinks fast, period `wifi_blink_period_ms` (150 ms), and overrides `colon_mode`. Back to normal as soon as WiFi associates again. |
 | Humidity < min or > max | Digits 3-4 go dark and back on every `humidity_blink_period_ms` (default 800 ms). Digits 1-2 keep showing the temperature. The colon keeps its pattern. |
 | Temperature -1 .. -9 °C | `-5:41` |
 | Temperature <= -9.5 °C | `LO:41` |
@@ -254,6 +256,12 @@ software setting.
 | `0` | Both dots permanently on |
 | `1` (default) | Both dots blink together, period `colon_blink_period_ms` |
 
+Independently of `colon_mode`, the colon blinks fast (period
+`wifi_blink_period_ms`, default 150 ms) while `wifi::global_wifi_component`
+reports **not connected**. That is the only status the node can signal without a
+network, so it takes precedence - including over `colon_mode: 0`. Connection is
+decided by WiFi association, not by MQTT or the API being reachable.
+
 Measured on the reference module: decimal-point index **1** (the second digit
 from the left) lights both dots. Module vendors wire this differently, so
 `colon_dot_digit` is a substitution rather than a hard-coded constant.
@@ -362,7 +370,8 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
 * Colon: `buf[colon_dot_digit] |= 0x80` every refresh when `colon_mode == 0`,
   and only on the even phase of `(millis()/800) % 2` when `colon_mode == 1`.
   Both colon dots hang on that one decimal-point line - they cannot be lit
-  separately. `colon_diagnostic: true` overrides everything and shows a digit
+  separately. While `wifi::global_wifi_component->is_connected()` is false the
+  phase uses `wifi_blink_period_ms` (150 ms) and `colon_mode` is ignored. `colon_diagnostic: true` overrides everything and shows a digit
   naming the index being lit (`probe = (millis()/2000) % 4`, digit `probe + 1`,
   with `buf[probe] |= 0x80`).
 * Temperature calibration: `sensor::OffsetFilter` on the AHT20 `temperature`
@@ -391,8 +400,11 @@ Machine-readable summary. Keep in sync with `humidity-temp.yaml`.
   never on every refresh. Off is a separate control bit (`set_on(false)`) and is
   not used.
 * Constants: `display_update_ms 250`, `colon_blink_period_ms 800`,
-  `humidity_blink_period_ms 800`, `colon_mode 1`, `colon_diagnostic false`,
-  `colon_dot_digit 1` (measured on the reference module).
+  `wifi_blink_period_ms 150`, `humidity_blink_period_ms 800`, `colon_mode 1`,
+  `colon_diagnostic false`, `colon_dot_digit 1` (measured on the reference
+  module).
+* `esp8266: restore_from_flash: true` - the default (`false`) keeps restored
+  values in RTC memory, which loses them on a real power cut (reboot is fine).
 * Requires ESPHome >= 2026.4 for `TM1637Display::set_buffer()`; developed
   against 2026.8.2.
 

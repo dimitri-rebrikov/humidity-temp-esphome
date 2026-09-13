@@ -45,6 +45,11 @@ substitutions:
   #   1 = both dots blink with colon_blink_period_ms
   colon_mode: "1"
 
+  # While the node has no WiFi (router down, out of range, wrong credentials)
+  # the colon blinks fast and ignores colon_mode. It is the only status the
+  # node can still signal without any network.
+  wifi_blink_period_ms: "150"
+
   # Calibration helper. While "true" the display ignores temperature and
   # humidity. For 2 s per step it shows a digit that names the decimal-point
   # index currently being lit: "1" -> index 0, "2" -> index 1, "3" -> index 2,
@@ -292,6 +297,7 @@ display:
       static const uint8_t SEG_UNKNOWN = 0x40;  // '-' while a value is unavailable
 
       static const uint32_t COLON_PERIOD_MS = ${colon_blink_period_ms};
+      static const uint32_t WIFI_PERIOD_MS = ${wifi_blink_period_ms};
       static const uint32_t HUMIDITY_PERIOD_MS = ${humidity_blink_period_ms};
 
       // Colon: 0 = both dots permanently on, 1 = both dots blinking.
@@ -362,7 +368,17 @@ display:
       // On the reference module both dots hang on COLON_DOT_DIGIT's decimal
       // point line, so they always switch together. A module that exposes the
       // two dots on two separate lines could light one per phase instead.
-      if (COLON_MODE == 0 || ((millis() / COLON_PERIOD_MS) % 2) == 0) {
+      //
+      // No WiFi overrides colon_mode: the fast blink is the only "I am offline"
+      // signal this node can give without a network.
+      const bool wifi_ok = wifi::global_wifi_component != nullptr &&
+                           wifi::global_wifi_component->is_connected();
+      const uint32_t colon_period = wifi_ok ? COLON_PERIOD_MS : WIFI_PERIOD_MS;
+      if (!wifi_ok || COLON_MODE != 0) {
+        if (((millis() / colon_period) % 2) == 0) {
+          buf[${colon_dot_digit}] |= 0x80;
+        }
+      } else {
         buf[${colon_dot_digit}] |= 0x80;
       }
 
